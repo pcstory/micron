@@ -15,7 +15,9 @@ Please summarize your thoughts on the following:
 
 ## Note
 
-- Assume the solution to be dockerize and deploy to ECS or EKS.
+![Solution](./solution.png "High Level Architecture")
+
+- Assume the solution to be dockerize and deploy to ECS.
 - Assume AWS SNS will be configured for error email notification.
 - Assume if running this in AWS ECS, console will be log to Cloud Logging mechanism. (Ex. CloudWatch). Local logging File can be ignored.
 - The output of the step is storing in local tmp directory for debug purpose and serving as input for following step in mannual trigger mode during troubleshooting.
