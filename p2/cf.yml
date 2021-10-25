@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation for q6-data-pipeline
+
+###############################################################################
+# Parameters
+###############################################################################
+Parameters:
+  ProjectName:
+    Default: q6-ml-pipeline
+    Type: String
+    Description: Project Name
+  EcsTaskImageECRRepoName:
+    Default: q6-ml-pipeline
+    Type: String
+    Description: ECR Repository name for ECS Task
+  VpcId:
+    Default: vpc-06205b8bd41ff2e9b
+    Type: String
+    Description: VPC
+  Q6PipelineTaskCron:
+    Default: cron(1 18 ? * * *)
+    Type: String
+    Description: ECR Repository name for ECS Task
+  SubnetId1:
+    Default: subnet-0e0c775ea7508ced6
+    Type: String
+    Description: Subnet ID 1
+  SubnetId3:
+    Default: subnet-0170aa498491b1a69
+    Type: String
+    Description: Subnet ID 3
+  SubnetId2:
+    Default: subnet-0390557b1fe1162cb
+    Type: String
+    Description: Subnet ID 2
+
+
+Resources:
+  ###############################################################################
+  # IAM Role
+  ###############################################################################
+  IoTDBRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${ProjectName}-role"
+      Path: /service-role/
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-role-policy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: IAMGetRole
+                Action:
+                  - iam:GetRole
+                Resource: "*"
+                Effect: Allow
+              - Sid: EcsScheduleRunPermission
+                Effect: "Allow"
+                Action:
+                  - ecs:RunTask
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:SetRepositoryPolicy
+                  - ecr:CompleteLayerUpload
+                  - ecr:BatchDeleteImage
+                  - ecr:UploadLayerPart
+                  - ecr:InitiateLayerUpload
+                  - ecr:DeleteRepository
+                  - ecr:PutImage
+                  - logs:CreateLogDelivery
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DeleteLogDelivery
+                  - logs:Describe*
+                  - logs:GetLogDelivery
+                  - logs:GetLogEvents
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:UpdateLogDelivery
+                Resource: "*"
+              - Sid: EcsScheduleRunPassRolePermission
+                Action:
+                  - iam:PassRole
+                Resource: arn:aws:iam::*:role/*
+                Effect: Allow
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ecs-tasks.amazonaws.com
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+              Service:
+                - ecs-tasks.amazonaws.com
+                - events.amazonaws.com
+
+  ###############################################################################
+  # ECS & ECR
+  ###############################################################################
+  EcsTaskImageECRRepo:
+    Type: "AWS::ECR::Repository"
+    Properties:
+      RepositoryName: !Sub "${EcsTaskImageECRRepoName}"
+
+  EcsFargateCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Sub "${ProjectName}-fargate-cluster"
+      DefaultCapacityProviderStrategy: []
+      CapacityProviders:
+        - FARGATE
+
+  EcsTaskSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: !Sub "${ProjectName}-ecs-task-security-group"
+      SecurityGroupIngress:
+        - ToPort: 80
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+          FromPort: 80
+        - ToPort: 1433
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+          FromPort: 1433
+      VpcId: !Sub "${VpcId}"
+      GroupDescription: Security Group for ECS Fargate Task
+      SecurityGroupEgress:
+        - ToPort: 80
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          FromPort: 80
+
+  ###############################################################################
+  # ECS Task
+  ###############################################################################'
+  Q6MLPipelineEcsTaskDefLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/q6"
+      RetentionInDays: 30
+
+  Q6MLPipelineEcsTaskDef:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      NetworkMode: awsvpc
+      Family: !Sub "${ProjectName}-q6-ml-task"
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "1024"
+      ExecutionRoleArn: !GetAtt
+        - IoTDBRole
+        - Arn
+      Volumes: []
+      Memory: "2048"
+      TaskRoleArn: !GetAtt
+        - IoTDBRole
+        - Arn
+      ContainerDefinitions:
+        - Name: !Sub "${ProjectName}-container"
+          Environment:
+            - Name: AWS_DEFAULT_REGION
+              Value: !Sub "${AWS::Region}"
+          Image: !Sub >-
+            ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcsTaskImageECRRepoName}:latest
+          Command:
+            - python3
+            - -m
+            - p2.pipeline
+            - --log=INFO
+            - -a
+            - full-pipeline
+          Cpu: 0
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Sub "${AWS::Region}"
+              awslogs-group: !Sub "/ecs/${ProjectName}/q6"
+              awslogs-stream-prefix: ecs
+          Essential: true
+
+  MonthlyMetricEcsTaskScheduleEventsRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Sub "${ProjectName}-q6-mls"
+      ScheduleExpression: !Sub "${Q6PipelineTaskCron}"
+      Description: Monthly Metrics Refresh
+      RoleArn: !GetAtt
+        - IoTDBRole
+        - Arn
+      State: ENABLED
+      Targets:
+        - RoleArn: !GetAtt
+            - IoTDBRole
+            - Arn
+          EcsParameters:
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: ENABLED
+                SecurityGroups:
+                  - !Ref EcsTaskSecurityGroup
+                Subnets:
+                  - !Sub "${SubnetId1}"
+                  - !Sub "${SubnetId2}"
+                  - !Sub "${SubnetId3}"
+            LaunchType: FARGATE
+            TaskDefinitionArn: !Ref Q6MLPipelineEcsTaskDef
+            TaskCount: 1
+          Id: !Sub "${ProjectName}-q6-mls-schedule"
+          Arn: !GetAtt
+            - EcsFargateCluster
+            - Arn
+
+
+###############################################################################
+# Output
+###############################################################################'
+Outputs:
+  SecurityGroup:
+    Description: 'EcsTaskSecurityGroup'
+    Value: !Ref EcsTaskSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-security-group'
